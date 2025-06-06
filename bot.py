@@ -33,6 +33,29 @@ if "Unnamed: 0" in top_risks_df.columns:
     top_risks_df = top_risks_df.drop(columns=["Unnamed: 0"])
 top_risks_df = top_risks_df.set_index("Cancer Outcome", drop=False)
 
+df = pd.read_json("../resources/json/lifestyle_data.json", lines=True).to_dict(orient="records")
+def create_response(keyword):
+    """
+    Create a response string based on the keyword and JSON data.
+
+    :param keyword: The keyword to search for in the JSON data
+    :param json_data: The JSON data containing lifestyle information
+    :return: A formatted response string
+    """
+    response = f"Here is the information related to '{keyword}':\n\n"
+    
+    filtered_data = [item for item in df if keyword.lower() in item['Agent'].lower()]
+    
+    if not filtered_data:
+        return f"No information found for '{keyword}'."
+    
+    for item in filtered_data:
+        response += f"**Agent:** {item['Agent']}\n"
+        response += f"**Group:** {item['Group']}\n"
+        response += f"**Evaluation Year:** {item['Evaluation year']}\n"
+        response += f"**Description:** {item.get('Description', 'No description available.')}\n\n"
+    
+    return response.strip()
 
 # ─── ALIASES & NORMALIZATION ─────────────────────────────────────
 ALIASES = {
@@ -44,10 +67,69 @@ ALIASES = {
     # …add any others you need…
 }
 
+advice_by_risk = {
+    "Cancers attributable to infections": (
+        "Limit your exposure to direct sunlight and use UV protection if you have to. "
+        "Use an air purifier at home, and if you live in a high‐pollution city, check daily AQI forecasts "
+        "and stay indoors on ‘very unhealthy’ days."
+  ),
+    "Smoking prevalence female": (
+        "Quitting smoking can cut risk of many cancers by 30–50% within the first year. "
+        "Consider nicotine replacement therapy, join a support group, or speak with your GP about counseling."
+    ),
+    "Indoor air pollution": (
+        "Avoid using open coal or biomass stoves indoors. Improve ventilation by keeping windows open or installing chimneys. "
+        "Consider switching to cleaner cookstoves or electric heating if available."
+    ),
+    "Obesity prevalence male": (
+        "Aim to keep your BMI between 18.5 and 24.9 kg/m². "
+        "Try to exercise at least 150 minutes/week (e.g. brisk walking), reduce sugary/processed foods, "
+        "and speak with a dietitian if you need personalized guidance."
+    ),
+    "HIV Prevalence (%)": (
+       "Practice safe sex practices. Avoid unprotected sex by using condoms correctly and consistently during all sexual activity, getting regularly tested and treated for STIs, limiting the number of sexual partners, do not share injection needles."
+)
+} 
+
+
 def normalize_country_input(user_text: str) -> str:
     candidate = user_text.strip().lower()
     return ALIASES.get(candidate, candidate)
 
+def get_cancers_for_country_and_gender(country_row: pd.Series, gender: str) -> list[str]:
+    """
+    Given a pandas Series for one country row (with columns Top1 Cancer, Top2 Cancer, Top3 Cancer)
+    and a gender ("male" or "female"), return a prioritized list of cancer‐outcome strings.
+    """
+    gender = gender.strip().lower()
+    filtered, fallback = [], []
+    for col in ["Top1 Cancer", "Top2 Cancer", "Top3 Cancer"]:
+        val = country_row.get(col, "")
+        if not isinstance(val, str) or not val.strip():
+            continue
+        # If the string explicitly contains ", male" or ", female", match it
+        if f", {gender}" in val.lower():
+            filtered.append(val)
+        else:
+            fallback.append(val)
+    return filtered if filtered else fallback
+
+
+def get_risk_factors_for_cancer(outcome: str) -> list[str]:
+    """
+    Given a cancer‐outcome string (e.g. "Lung cancer incidence rates, male"),
+    return its Top1 and Top2 Risk Factor as a list. If not found, return [].
+    """
+    try:
+        row = top_risks_df.loc[outcome]
+        factors = []
+        for col in ["Top1 Risk Factor", "Top2 Risk Factor"]:
+            val = row.get(col, "")
+            if isinstance(val, str) and val.strip():
+                factors.append(val)
+        return factors
+    except KeyError:
+        return []
 
 # ─── STATE + HANDLERS ────────────────────────────────────────────
 user_state = {}  # chat_id → {"country": str, "gender": str}
@@ -67,7 +149,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Available Commands:*\n\n"
         "/start – Greet and explain what I do\n"
         "/help  – Show this help message\n"
-        "/recommendation – Receive recommendation based on demographics\n\n"
+        "/recommendation – Health advise based on demographics\n"
+        "/risk – Information about common cancerogenic hazards\n"
         "_Example:_ `/recommendation`"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -81,6 +164,27 @@ async def recommendation_command(update: Update, context: ContextTypes.DEFAULT_T
         "First, please type your country (e.g., \"France\", \"Brazil\", \"India\")."
     )
 
+async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /risk <keyword> – Looks up the given keyword in lifestyle_data.json and returns the matching entries.
+    If no keyword is provided, prompt the user for correct usage.
+    """
+    chat_id = update.effective_chat.id
+    args = context.args  # list of words after “/risk”
+
+    if not args:
+        await update.message.reply_text(
+            "❗️ Usage: /risk <keyword>\n"
+            "Please provide exactly one keyword (e.g. `/risk Tobacco`)."
+        )
+        return
+
+    # Join all args into a single search term (in case keyword itself has spaces)
+    keyword = " ".join(args).strip()
+    response_text = create_response(keyword)
+
+    # Send the response with Markdown formatting (for bold/italics)
+    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -169,6 +273,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("recommendation", recommendation_command))
+    application.add_handler(CommandHandler("risk", risk_command))
 
     application.add_handler(
         MessageHandler(filters.Regex(r"^/"), unknown_command)
